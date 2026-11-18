@@ -231,7 +231,7 @@ def identify(query):
                 if got == wanted or (wanted in got and len(wanted) >= 0.7 * len(got)):
                     app_id = int(hit["objectID"])
                     break
-            elif name.isascii() and name:
+            elif name:
                 # An English title for a Chinese query: check it against the game's own Chinese store name.
                 zh = steam_details(int(hit["objectID"]), "schinese")
                 got = norm(zh["name"]) if zh else ""
