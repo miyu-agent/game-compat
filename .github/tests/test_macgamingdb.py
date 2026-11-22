@@ -54,6 +54,12 @@ class MacGamingDB(unittest.TestCase):
         text = "\n".join(self.mod.mgdb_render(data))
         self.assertIn("CrossOver + D3D_METAL · M1 Max", text)
 
+    def test_chip_lists_only_that_chip(self):
+        data = self.mod.macgamingdb(367520, "Hollow Knight", 5, "M1")
+        self.assertEqual((data["chip_reports"], [r["chip"] for r in data["recent"]]), (1, ["M1 Max"]))
+        self.assertEqual(self.mod.macgamingdb(367520, "Hollow Knight", 5, "M1 Pro")["chip_reports"], 0)
+        self.assertIn("M3 的报告 1 份", "\n".join(self.mod.mgdb_render(self.mod.macgamingdb(367520, "x", 5, "M3"))))
+
     def test_falls_back_to_an_exact_name_in_the_search(self):
         data = self.mod.macgamingdb(None, "hollow knight", 1)
         self.assertEqual(data["name"], "Hollow Knight")
@@ -69,10 +75,10 @@ class MacGamingDB(unittest.TestCase):
 
     def test_platform_mac_skips_the_linux_sources(self):
         self.mod.identify = lambda q: {"app_id": 367520, "name": "Hollow Knight", "linux": True, "mac": True}
-        query, ident, proton, cheat, site, mac = self.mod.check("Hollow Knight", 1, "mac")
-        self.assertEqual((proton, cheat, site), (None, None, None))
+        query, ident, proton, cheat, site, deck, mac = self.mod.check("Hollow Knight", 1, "mac")
+        self.assertEqual((proton, cheat, site, deck), (None, None, None, None))
         self.assertEqual(mac[0], "ok")
-        out = self.mod.to_json(query, ident, proton, cheat, site, mac)
+        out = self.mod.to_json(query, ident, proton, cheat, site, deck, mac)
         self.assertEqual(out["protondb"], {"status": "skipped"})
         self.assertTrue(out["game"]["mac_native"])
         self.assertEqual(out["macgamingdb"]["status"], "ok")

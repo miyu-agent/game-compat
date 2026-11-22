@@ -7,6 +7,7 @@ Miyu 技能包，带一个技能 `game-compat`：查一款游戏在 Linux（含 
 | Linux | ProtonDB | 评级（总评、最近、最好）、报告数、最近几份玩家报告：结论、Proton 版本、出的问题、启动参数、备注 |
 | Linux | AreWeAntiCheatYet | 反作弊状态（Supported、Denied……）、用的是哪家反作弊、最近的变动 |
 | Linux | caniplayonlinux | 一句话结论和最后核实的日期 |
+| Steam Deck | Steam（Valve 的测试） | 已验证、可游玩、不支持，和 Valve 给的原因 |
 | Mac | MacGamingDB | 评级、报告数、玩家怎么跑的（原生、CrossOver、Parallels），最近几份报告：用的芯片、转译层、帧数、画质、备注 |
 
 技能里的脚本由 AI 在 `shell` 里运行，也可以自己运行：
@@ -19,6 +20,7 @@ python3 skills/game-compat/scripts/game_compat.py "Elden Ring" --platform mac
 |---|---|
 | 游戏 | Steam App ID 或游戏名，必填。英文原名最准；中文名照 Steam 的中文商店名对 |
 | `--platform` | `linux`、`mac`、`all`，默认 `all` |
+| `--chip` | 只看 Mac 上某个芯片的报告，例如 `M1`、`M2 Pro`；`M1` 包括 Pro、Max、Ultra |
 | `--reports` | 每个来源列几份玩家报告，0–20，默认 6；0 只给评级 |
 | `--json` | 输出 JSON，给代码用 |
 
