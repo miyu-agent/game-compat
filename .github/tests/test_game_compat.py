@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "game_compat.py"
+SCRIPT = pathlib.Path(__file__).resolve().parents[2] / "skills" / "game-compat" / "scripts" / "game_compat.py"
 
 
 def load():

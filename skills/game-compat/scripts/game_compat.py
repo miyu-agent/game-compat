@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
-# Display name: Game Linux compatibility
-# 显示名称：游戏 Linux 兼容性
-# Description: Check how a game runs on Linux: ProtonDB rating and recent player reports, anti-cheat status from AreWeAntiCheatYet, and the caniplayonlinux verdict. Takes a Steam App ID or a game name.
-# 描述：查一款游戏在 Linux 上能不能玩：ProtonDB 评级和最近的玩家报告、AreWeAntiCheatYet 的反作弊状态、caniplayonlinux 的结论；给 Steam App ID 或游戏名。
-# Timeout: 60
-# Clicall: yes
-# Parameters:
-# {"type": "object", "properties": {
-#   "query": {"type": "string", "description": "Steam App ID or game name. The English title is most reliable; a Chinese name is matched through Steam's Chinese store names."},
-#   "max_reports": {"type": "integer", "description": "Recent ProtonDB reports to show, 0-20. Default 6; 0 gives the ratings alone."},
-#   "format": {"type": "string", "enum": ["md", "json"], "description": "md (default) for reading; json for code, e.g. piping miyu call into jq or python."}
-# }, "required": ["query"]}
-"""Three sources, looked up in two steps.
+"""How a game runs on Linux and on Apple Silicon Macs (the game-compat skill runs this through shell).
+
+    python3 game_compat.py "<Steam App ID or game name>" [--platform linux|mac|all] [--reports N] [--json]
+
+Linux: ProtonDB rating and recent player reports, AreWeAntiCheatYet anti-cheat status, the caniplayonlinux verdict.
+Mac: MacGamingDB rating, how players ran it (native, CrossOver, Parallels) and recent reports with the chip used.
+
+Looked up in two steps.
 
 1. The query becomes a Steam App ID plus the English title: an App ID through
    Steam's appdetails, an English name through ProtonDB's Algolia index, a
    Chinese name through Steam's store search in the schinese locale first.
    A match that does not look like the game asked for is reported, not used.
-2. ProtonDB (summary + player reports), AreWeAntiCheatYet (games.json) and
-   caniplayonlinux (game page) are fetched at the same time with that identity.
+2. ProtonDB (summary + player reports), AreWeAntiCheatYet (games.json),
+   caniplayonlinux (game page) and MacGamingDB (game + reports) are fetched at the
+   same time with that identity, only the ones for the platform asked for.
 
 A source with no entry says so; a source that failed says it failed. The two
 are never mixed up: "not listed" is not "no anti-cheat".
@@ -62,10 +58,6 @@ FAULTS = [("audioFaults", "声音"), ("graphicalFaults", "画面"), ("windowingF
 VERDICTS = {"recommended": "推荐", "not_recommended": "不推荐", "broken": "打不开", "unknown": "没写结论"}
 
 
-class Failed(Exception):
-    pass
-
-
 class HttpError(Exception):
     def __init__(self, message, status=None):
         super().__init__(message)
@@ -105,9 +97,11 @@ def fetch_json(url, **kw):
 
 
 def cached(name, url):
-    """Fetch through a 24-hour file cache in MIYU_CACHE_DIR; a cache that cannot be written is skipped."""
-    base = os.environ.get("MIYU_CACHE_DIR") or os.environ.get("MIYU_SCRIPT_CACHE_DIR")
-    path = os.path.join(base, name) if base else None
+    """Fetch through a 24-hour file cache; a cache that cannot be written is skipped. Run by the AI through shell
+    (inside a skill) there is no MIYU_CACHE_DIR, so it falls back to ~/.cache/miyu-game-compat."""
+    base = (os.environ.get("MIYU_CACHE_DIR") or os.environ.get("MIYU_SCRIPT_CACHE_DIR")
+            or os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "miyu-game-compat"))
+    path = os.path.join(base, name)
     if path:
         try:
             if time.time() - os.path.getmtime(path) < CACHE_TTL:
@@ -177,13 +171,15 @@ def algolia(query, hits=5):
 
 
 def steam_details(app_id, language="english"):
-    """Store name and Linux build for an App ID; None when Steam has no such app."""
+    """Store name and native Linux / Mac builds for an App ID; None when Steam has no such app."""
     value = fetch_json(f"{STEAM_DETAILS}?appids={app_id}&l={language}&filters=basic,platforms")
     entry = value.get(str(app_id)) or {}
     if not entry.get("success"):
         return None
     data = entry.get("data") or {}
-    return {"name": data.get("name") or str(app_id), "linux": bool((data.get("platforms") or {}).get("linux"))}
+    platforms = data.get("platforms") or {}
+    return {"name": data.get("name") or str(app_id), "linux": bool(platforms.get("linux")),
+            "mac": bool(platforms.get("mac"))}
 
 
 def overlap(query, name):
@@ -199,7 +195,7 @@ def identify(query):
         details = steam_details(int(query))
         if details is None:
             return {"app_id": None, "miss": f"Steam 上没有 App ID {query}"}
-        return {"app_id": int(query), "name": details["name"], "linux": details["linux"]}
+        return {"app_id": int(query), "name": details["name"], "linux": details["linux"], "mac": details.get("mac", False)}
 
     if not CJK.search(query):
         hits = algolia(query)
@@ -211,8 +207,9 @@ def identify(query):
             # Algolia always returns something; for a game not on Steam it is an unrelated one ("Valorant" -> "NoFlash").
             others = "、".join(str(h.get("name")) for h in hits[:4])
             return {"app_id": None, "miss": f"Steam 上搜到的是 {others}，都不像这款游戏，它可能不在 Steam 上"}
-        linux = "linux" in [str(o).lower() for o in top.get("oslist") or []]
-        return {"app_id": int(top["objectID"]), "name": name, "linux": linux}
+        oslist = [str(o).lower() for o in top.get("oslist") or []]
+        return {"app_id": int(top["objectID"]), "name": name, "linux": "linux" in oslist,
+                "mac": "macos" in oslist or "mac" in oslist}
 
     # Chinese name: Steam's own Chinese titles first, then the Algolia index (which knows some Chinese aliases).
     wanted = norm(query)
@@ -245,7 +242,7 @@ def identify(query):
         seen = "、".join(dict.fromkeys(c for c in candidates if c)) or "没有"
         return {"app_id": None, "miss": f"Steam 上没对上这个中文名（搜到的：{seen}）。换英文原名再查；不在 Steam 上的游戏（WeGame、自家启动器）ProtonDB 本来就没有"}
     details = steam_details(app_id) or {"name": query, "linux": False}
-    return {"app_id": app_id, "name": details["name"], "linux": details["linux"]}
+    return {"app_id": app_id, "name": details["name"], "linux": details["linux"], "mac": details.get("mac", False)}
 
 
 # ---------------------------------------------------------------- ProtonDB
@@ -393,6 +390,109 @@ def cipol(name):
     return {"summary": summary, "verified": verified, "url": url}
 
 
+# ---------------------------------------------------------------- MacGamingDB
+# Community reports of how games run on Apple Silicon Macs. Public REST API, documented in the project's
+# openapi.json (github.com/neo773/macgamingdb, MIT): GET /api/rest/games/{id} gives a game with its reports, and Steam
+# games use the Steam App ID as the id; GET /api/rest/games/search?query= searches by name (each hit has a ref).
+
+MGDB = "https://macgamingdb.app"
+MGDB_API = f"{MGDB}/api/rest"
+
+MAC_PERFORMANCE = {"EXCELLENT": "极好", "VERY_GOOD": "很好", "GOOD": "好", "PLAYABLE": "能玩",
+               "BARELY_PLAYABLE": "勉强能玩", "UNPLAYABLE": "玩不了"}
+MAC_METHODS = {"NATIVE": "原生", "CROSSOVER": "CrossOver", "PARALLELS": "Parallels", "OTHER": "其他"}
+
+
+def mgdb_game(ref):
+    """The game and its reports by ref; None when the site has no such game."""
+    try:
+        return fetch_json(f"{MGDB_API}/games/{urllib.parse.quote(str(ref), safe='')}")
+    except HttpError as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+
+def mgdb_search(name):
+    hits = fetch_json(f"{MGDB_API}/games/search?query={urllib.parse.quote(name)}")
+    return [h for h in hits if isinstance(h, dict) and h.get("ref")] if isinstance(hits, list) else []
+
+
+def macgamingdb(app_id, name, max_reports):
+    """Steam App ID first, then an exact name match in the search; None when the site has no reports for the game."""
+    found = mgdb_game(app_id) if app_id is not None else None
+    if not found and name:
+        wanted = norm(name)
+        for hit in mgdb_search(name):
+            if norm(str(hit.get("name", ""))) == wanted:
+                found = mgdb_game(hit["ref"])
+                break
+    if not isinstance(found, dict) or not isinstance(found.get("game"), dict):
+        return None
+    summary = mgdb_summary(found, max_reports)
+    # A game page with no reports yet (the site lists every Steam game it has heard of) says nothing either.
+    return summary if summary["reports"] else None
+
+
+def mgdb_chip(review):
+    chip = review.get("chipset") or ""
+    variant = review.get("chipsetVariant") or ""
+    variant = "" if variant in ("BASE", "") else variant.title()
+    return " ".join(p for p in (chip, variant) if p) or "芯片没写"
+
+
+def mgdb_summary(found, max_reports):
+    game = found["game"]
+    stats = found.get("stats") if isinstance(found.get("stats"), dict) else {}
+    methods = stats.get("methods") if isinstance(stats.get("methods"), dict) else {}
+    reviews = [r for r in found.get("reviews") or [] if isinstance(r, dict)]
+    reviews.sort(key=lambda r: str(r.get("createdAt") or ""), reverse=True)
+    recent = []
+    for review in reviews[:max_reports]:
+        recent.append({
+            "date": str(review.get("createdAt") or "")[:10] or "日期不明",
+            "method": MAC_METHODS.get(str(review.get("playMethod")), str(review.get("playMethod") or "没写")),
+            "layer": review.get("translationLayer") or None,
+            "performance": MAC_PERFORMANCE.get(str(review.get("performance")), str(review.get("performance") or "没写")),
+            "fps": review.get("fps"),
+            "chip": mgdb_chip(review),
+            "settings": review.get("graphicsSettings") or None,
+            "note": flatten(review["notes"]) if isinstance(review.get("notes"), str) and review["notes"].strip() else None,
+        })
+    rating = game.get("aggregatedPerformance")
+    return {
+        "name": game.get("name"),
+        "rating": MAC_PERFORMANCE.get(str(rating), rating),
+        "reports": game.get("reviewCount") if isinstance(game.get("reviewCount"), int) else len(reviews),
+        "methods": {MAC_METHODS.get(k.upper(), k): v for k, v in methods.items() if isinstance(v, int) and v},
+        "average": stats.get("averagePerformance"),
+        "url": f"{MGDB}/games/{game.get('slug', '')}",
+        "recent": recent,
+    }
+
+
+def mgdb_render(data):
+    out = []
+    bits = [data["rating"] or "未评级", f"{data['reports']} 份报告"]
+    if data["methods"]:
+        bits.append("，".join(f"{k} {v}" for k, v in data["methods"].items()))
+    out.append(f"\n## MacGamingDB（Apple 芯片 Mac）：{' · '.join(bits)}")
+    out.append(data["url"])
+    if data["recent"]:
+        out.append("最近的报告：")
+        for rep in data["recent"]:
+            how = rep["method"] + (f" + {rep['layer']}" if rep["layer"] else "")
+            head = f"- {rep['date']} {rep['performance']} · {how} · {rep['chip']}"
+            if rep["fps"]:
+                head += f" · {rep['fps']} FPS"
+            if rep["settings"]:
+                head += f" · 画质 {str(rep['settings']).lower()}"
+            out.append(head)
+            if rep["note"]:
+                out.append(f"  {rep['note']}")
+    return out
+
+
 # ---------------------------------------------------------------- output
 
 def attempt(fn, *args):
@@ -402,7 +502,7 @@ def attempt(fn, *args):
         return "err", str(exc) or type(exc).__name__
 
 
-def render(query, ident, proton, cheat, site):
+def render(query, ident, proton, cheat, site, mac):
     out = []
     if ident[0] == "err":
         out += [f"# {query}", f"认游戏这一步出错了：{ident[1]}"]
@@ -411,7 +511,8 @@ def render(query, ident, proton, cheat, site):
     else:
         game = ident[1]
         out.append(f"# {game['name']}")
-        out.append(f"Steam App ID {game['app_id']}" + (" · 有原生 Linux 版" if game["linux"] else ""))
+        natives = [label for key, label in (("linux", "原生 Linux 版"), ("mac", "原生 Mac 版")) if game.get(key)]
+        out.append(f"Steam App ID {game['app_id']}" + (f" · 有{'、'.join(natives)}" if natives else ""))
 
     if proton is not None:
         if proton[0] == "err":
@@ -443,7 +544,9 @@ def render(query, ident, proton, cheat, site):
                     if rep["note"]:
                         out.append(f"  {rep['note']}")
 
-    if cheat[0] == "err":
+    if cheat is None:
+        pass
+    elif cheat[0] == "err":
         out.append(f"\n## 反作弊（AreWeAntiCheatYet）：出错\n{cheat[1]}")
     elif cheat[1] is None:
         out.append("\n## 反作弊（AreWeAntiCheatYet）：没收录（不等于没有反作弊）")
@@ -460,7 +563,9 @@ def render(query, ident, proton, cheat, site):
             if isinstance(note, list) and note and isinstance(note[0], str):
                 out.append(f"- {flatten(note[0])}")
 
-    if site[0] == "err":
+    if site is None:
+        pass
+    elif site[0] == "err":
         out.append(f"\n## caniplayonlinux：出错\n{site[1]}")
     elif site[1] is None:
         out.append("\n## caniplayonlinux：没有这款游戏的页面")
@@ -470,20 +575,33 @@ def render(query, ident, proton, cheat, site):
         if entry["summary"]:
             out.append(flatten(entry["summary"], 600))
         out.append(entry["url"])
+
+    if mac is None:
+        pass
+    elif mac[0] == "err":
+        out.append(f"\n## MacGamingDB（Apple 芯片 Mac）：出错\n{mac[1]}")
+    elif mac[1] is None:
+        out.append("\n## MacGamingDB（Apple 芯片 Mac）：没有这款游戏的报告")
+    else:
+        out += mgdb_render(mac[1])
     return "\n".join(out).strip()
 
 
-def check(query, max_reports):
+def check(query, max_reports, platform="all"):
+    """The sources for `platform` (linux, mac or all); a source not asked for is None."""
     ident = attempt(identify, query)
     found = ident[0] == "ok" and ident[1]["app_id"] is not None
-    # A query we could not pin to a Steam game still has a chance on the anti-cheat list by name (Valorant, LoL).
+    # A query we could not pin to a Steam game still has a chance on the anti-cheat list and MacGamingDB by name.
     name = ident[1]["name"] if found else query
     app_id = ident[1]["app_id"] if found else None
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_proton = pool.submit(attempt, protondb, app_id, max_reports) if found else None
-        f_cheat = pool.submit(attempt, awacy, app_id, name)
-        f_site = pool.submit(attempt, cipol, name)
-        return query, ident, f_proton.result() if f_proton else None, f_cheat.result(), f_site.result()
+    linux, mac = platform in ("linux", "all"), platform in ("mac", "all")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_proton = pool.submit(attempt, protondb, app_id, max_reports) if found and linux else None
+        f_cheat = pool.submit(attempt, awacy, app_id, name) if linux else None
+        f_site = pool.submit(attempt, cipol, name) if linux else None
+        f_mac = pool.submit(attempt, macgamingdb, app_id, name, max_reports) if mac else None
+        done = [f.result() if f else None for f in (f_proton, f_cheat, f_site, f_mac)]
+        return (query, ident, *done)
 
 
 def plain(text):
@@ -501,7 +619,7 @@ def source_json(result, build):
     return dict({"status": "ok"}, **build(result[1]))
 
 
-def to_json(query, ident, proton, cheat, site):
+def to_json(query, ident, proton, cheat, site, mac):
     out = {"ok": True, "query": query, "game": None}
     if ident[0] == "err":
         out["game_error"] = ident[1]
@@ -509,7 +627,8 @@ def to_json(query, ident, proton, cheat, site):
         out["game_error"] = ident[1]["miss"]
     else:
         game = ident[1]
-        out["game"] = {"app_id": game["app_id"], "name": game["name"], "linux_native": game["linux"]}
+        out["game"] = {"app_id": game["app_id"], "name": game["name"], "linux_native": game["linux"],
+                       "mac_native": game.get("mac", False)}
     out["protondb"] = source_json(proton, lambda d: {
         "tier": d["tier"], "trending_tier": d["trending"], "best_tier": d["best"], "total_reports": d["total"],
         "url": f"{PROTONDB}/app/{ident[1]['app_id']}", "reports_error": d["reports_error"],
@@ -528,53 +647,25 @@ def to_json(query, ident, proton, cheat, site):
     out["anticheat"]["source"] = "AreWeAntiCheatYet"
     out["caniplayonlinux"] = source_json(site, lambda e: {"verified": e["verified"], "summary": e["summary"],
                                                           "url": e["url"]})
+    out["macgamingdb"] = source_json(mac, lambda d: dict(d, recent=[dict(r, note=plain(r["note"]))
+                                                                     for r in d["recent"]]))
     return out
 
 
-def known_params():
-    """开头 Parameters 里写的参数名：不认识的参数直接报错，免得写错的名字被悄悄当成没给。"""
-    lines, inside = [], False
-    with open(__file__, encoding="utf-8") as f:
-        for line in f:
-            if not line.startswith("#"):
-                break
-            if line.startswith("# Parameters:"):
-                inside = True
-            elif inside:
-                lines.append(line[1:])
-    return set(json.loads("".join(lines)).get("properties", {}))
-
-
-def reject_unknown(args):
-    unknown = sorted(set(args) - known_params())
-    if unknown:
-        raise Failed(f"不认识的参数：{'、'.join(unknown)}。能用的：{'、'.join(sorted(known_params()))}")
-
-
 def main():
-    as_json = False
-    try:
-        try:
-            args = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
-            raise Failed(f"参数不是 JSON：{exc}")
-        if not isinstance(args, dict):
-            raise Failed("参数要是一个 JSON 对象")
-        as_json = args.get("format") == "json"
-        reject_unknown(args)
-        if args.get("format") not in (None, "md", "json"):
-            raise Failed(f"format 只认 md、json，不认 {args['format']}")
-        query = str(args.get("query") or "").strip()
-        if not query:
-            raise Failed("没给 query：写 Steam App ID 或游戏名")
-        reports = args.get("max_reports", DEFAULT_REPORTS)
-        if isinstance(reports, bool) or not isinstance(reports, (int, float)) or reports < 0:
-            raise Failed("max_reports 要是 0–20 的整数")
-        parts = check(query, min(int(reports), MAX_REPORTS))
-        print(json.dumps(to_json(*parts), ensure_ascii=False) if as_json else render(*parts))
-    except Failed as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False) if as_json else f"错误：{exc}")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="How a game runs on Linux and on Apple Silicon Macs.")
+    parser.add_argument("query", nargs="+", help="Steam App ID or game name; the English title is most reliable")
+    parser.add_argument("--platform", choices=["linux", "mac", "all"], default="all", help="Default all.")
+    parser.add_argument("--reports", type=int, default=DEFAULT_REPORTS,
+                        help=f"Recent player reports per source, 0-{MAX_REPORTS}. Default {DEFAULT_REPORTS}.")
+    parser.add_argument("--json", action="store_true", help="JSON for code instead of text for reading.")
+    args = parser.parse_args()
+    query = " ".join(args.query).strip()
+    if not query or not 0 <= args.reports <= MAX_REPORTS:
+        parser.error(f"give a game, and --reports from 0 to {MAX_REPORTS}")
+    parts = check(query, args.reports, args.platform)
+    print(json.dumps(to_json(*parts), ensure_ascii=False) if args.json else render(*parts))
 
 
 if __name__ == "__main__":
